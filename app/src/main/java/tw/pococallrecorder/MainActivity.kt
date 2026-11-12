@@ -5,6 +5,7 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.Bundle
 import android.widget.Button
@@ -15,7 +16,10 @@ import android.widget.Toast
 class MainActivity : Activity() {
 
     private val requestCode = 100
+    private val projectionRequestCode = 200
+
     private lateinit var status: TextView
+
     private var pendingAction: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -32,7 +36,7 @@ class MainActivity : Activity() {
         }
 
         status = TextView(this).apply {
-            text = "POCO 通話錄音測試版\n\n請啟用來電自動偵測。"
+            text = "免 Root 音訊擷取測試版\n\n請選擇錄音功能。"
             textSize = 16f
             setPadding(0, 28, 0, 28)
         }
@@ -47,7 +51,7 @@ class MainActivity : Activity() {
         }
 
         val manualStart = Button(this).apply {
-            text = "手動開始錄音（撥出電話使用）"
+            text = "手動開始錄音（一般麥克風）"
             setOnClickListener {
                 requestAndStart(
                     RecordingService.ACTION_MANUAL_START
@@ -55,12 +59,30 @@ class MainActivity : Activity() {
             }
         }
 
+        val playbackStart = Button(this).apply {
+            text = "測試系統音訊擷取（LINE 測試）"
+            setOnClickListener {
+                requestPlaybackCapture()
+            }
+        }
+
         val stopRecording = Button(this).apply {
-            text = "停止錄音"
+            text = "停止所有錄音"
             setOnClickListener {
                 sendServiceAction(
                     RecordingService.ACTION_STOP_RECORDING
                 )
+
+                stopService(
+                    Intent(
+                        this@MainActivity,
+                        AudioCaptureService::class.java
+                    ).setAction(
+                        AudioCaptureService.ACTION_STOP
+                    )
+                )
+
+                status.text = "已送出停止指令。"
             }
         }
 
@@ -73,6 +95,7 @@ class MainActivity : Activity() {
                         RecordingService::class.java
                     )
                 )
+
                 status.text = "自動偵測服務已停止。"
             }
         }
@@ -81,6 +104,7 @@ class MainActivity : Activity() {
         layout.addView(status)
         layout.addView(autoStart)
         layout.addView(manualStart)
+        layout.addView(playbackStart)
         layout.addView(stopRecording)
         layout.addView(disableAuto)
 
@@ -107,6 +131,7 @@ class MainActivity : Activity() {
 
         if (missing.isNotEmpty()) {
             pendingAction = action
+
             requestPermissions(
                 missing.toTypedArray(),
                 requestCode
@@ -116,9 +141,54 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestPlaybackCapture() {
+
+        if (
+            checkSelfPermission(
+                Manifest.permission.RECORD_AUDIO
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            pendingAction = "PLAYBACK"
+
+            requestPermissions(
+                arrayOf(
+                    Manifest.permission.RECORD_AUDIO
+                ),
+                requestCode
+            )
+
+            return
+        }
+
+        try {
+
+            val manager =
+                getSystemService(
+                    MEDIA_PROJECTION_SERVICE
+                ) as MediaProjectionManager
+
+            val intent =
+                manager.createScreenCaptureIntent()
+
+            startActivityForResult(
+                intent,
+                projectionRequestCode
+            )
+
+            status.text =
+                "等待 Android 系統音訊擷取授權..."
+
+        } catch (e: Exception) {
+
+            status.text =
+                "無法啟動音訊擷取：${e.message}"
+        }
+    }
+
     private fun sendServiceAction(action: String) {
 
         try {
+
             val intent = Intent(
                 this,
                 RecordingService::class.java
@@ -145,7 +215,83 @@ class MainActivity : Activity() {
             }
 
         } catch (e: Exception) {
-            status.text = "啟動失敗：${e.message}"
+
+            status.text =
+                "啟動失敗：${e.message}"
+        }
+    }
+
+    private fun startPlaybackService(
+        resultCode: Int,
+        data: Intent
+    ) {
+
+        try {
+
+            val intent = Intent(
+                this,
+                AudioCaptureService::class.java
+            ).apply {
+
+                action =
+                    AudioCaptureService.ACTION_START
+
+                putExtra(
+                    AudioCaptureService.EXTRA_RESULT_CODE,
+                    resultCode
+                )
+
+                putExtra(
+                    AudioCaptureService.EXTRA_RESULT_DATA,
+                    data
+                )
+            }
+
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+
+            status.text =
+                "系統音訊擷取服務啟動中。"
+
+        } catch (e: Exception) {
+
+            status.text =
+                "啟動擷取服務失敗：${e.message}"
+        }
+    }
+
+    @Deprecated("使用系統 Activity Result 回呼")
+    override fun onActivityResult(
+        requestCode: Int,
+        resultCode: Int,
+        data: Intent?
+    ) {
+        super.onActivityResult(
+            requestCode,
+            resultCode,
+            data
+        )
+
+        if (requestCode == projectionRequestCode) {
+
+            if (
+                resultCode == RESULT_OK &&
+                data != null
+            ) {
+
+                startPlaybackService(
+                    resultCode,
+                    data
+                )
+
+            } else {
+
+                status.text =
+                    "你取消了系統音訊擷取授權。"
+            }
         }
     }
 
@@ -167,22 +313,33 @@ class MainActivity : Activity() {
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
 
-            val phoneGranted =
-                checkSelfPermission(
-                    Manifest.permission.READ_PHONE_STATE
-                ) == PackageManager.PERMISSION_GRANTED
+            if (audioGranted) {
 
-            if (audioGranted && phoneGranted) {
+                when (pendingAction) {
 
-                pendingAction?.let {
-                    sendServiceAction(it)
+                    "PLAYBACK" -> {
+                        requestPlaybackCapture()
+                    }
+
+                    else -> {
+                        val action = pendingAction
+
+                        if (
+                            action ==
+                            RecordingService.ACTION_ENABLE_AUTO ||
+                            action ==
+                            RecordingService.ACTION_MANUAL_START
+                        ) {
+                            sendServiceAction(action)
+                        }
+                    }
                 }
 
             } else {
 
                 Toast.makeText(
                     this,
-                    "需要麥克風及電話狀態權限。",
+                    "需要麥克風權限才能錄音。",
                     Toast.LENGTH_LONG
                 ).show()
             }
