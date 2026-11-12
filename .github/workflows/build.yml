@@ -54,15 +54,22 @@ jobs:
         run: |
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
+          from pathlib import Path
 
-          path = "app/src/main/AndroidManifest.xml"
+          path = Path("app/src/main/AndroidManifest.xml")
+          content = path.read_bytes()
 
-          try:
-              ET.parse(path)
-              print("Manifest XML syntax OK")
-          except ET.ParseError as e:
-              print("Manifest XML ERROR:", e)
-              raise
+          if content.startswith(b'\xef\xbb\xbf'):
+              content = content[3:]
+
+          content = content.lstrip(b'\r\n\t ')
+
+          if content.startswith(b'<?xml') and content.count(b'<?xml') > 1:
+              raise ValueError("Duplicate XML declaration found")
+
+          ET.fromstring(content)
+
+          print("AndroidManifest.xml validation PASSED")
           PY
 
       # 6. 編譯 APK
