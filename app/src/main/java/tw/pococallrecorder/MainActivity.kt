@@ -32,7 +32,7 @@ class MainActivity : Activity() {
         }
 
         status = TextView(this).apply {
-            text = "來電自動錄音測試版\n\n請先啟用自動偵測，讓服務在背景待命。"
+            text = "POCO 通話錄音測試版\n\n請啟用來電自動偵測。"
             textSize = 16f
             setPadding(0, 28, 0, 28)
         }
@@ -40,21 +40,27 @@ class MainActivity : Activity() {
         val autoStart = Button(this).apply {
             text = "啟用來電自動偵測"
             setOnClickListener {
-                requestAndStart(RecordingService.ACTION_ENABLE_AUTO)
+                requestAndStart(
+                    RecordingService.ACTION_ENABLE_AUTO
+                )
             }
         }
 
         val manualStart = Button(this).apply {
             text = "手動開始錄音（撥出電話使用）"
             setOnClickListener {
-                requestAndStart(RecordingService.ACTION_MANUAL_START)
+                requestAndStart(
+                    RecordingService.ACTION_MANUAL_START
+                )
             }
         }
 
         val stopRecording = Button(this).apply {
             text = "停止錄音"
             setOnClickListener {
-                sendServiceAction(RecordingService.ACTION_STOP_RECORDING)
+                sendServiceAction(
+                    RecordingService.ACTION_STOP_RECORDING
+                )
             }
         }
 
@@ -62,7 +68,10 @@ class MainActivity : Activity() {
             text = "停止自動偵測"
             setOnClickListener {
                 stopService(
-                    Intent(this@MainActivity, RecordingService::class.java)
+                    Intent(
+                        this@MainActivity,
+                        RecordingService::class.java
+                    )
                 )
                 status.text = "自動偵測服務已停止。"
             }
@@ -79,40 +88,55 @@ class MainActivity : Activity() {
     }
 
     private fun requestAndStart(action: String) {
+
         val permissions = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE
         )
 
         if (Build.VERSION.SDK_INT >= 33) {
-            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+            permissions.add(
+                Manifest.permission.POST_NOTIFICATIONS
+            )
         }
 
         val missing = permissions.filter {
-            checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED
+            checkSelfPermission(it) !=
+                PackageManager.PERMISSION_GRANTED
         }
 
         if (missing.isNotEmpty()) {
             pendingAction = action
-            requestPermissions(missing.toTypedArray(), requestCode)
+            requestPermissions(
+                missing.toTypedArray(),
+                requestCode
+            )
         } else {
             sendServiceAction(action)
         }
     }
 
     private fun sendServiceAction(action: String) {
-        try {
-            val intent = Intent(this, RecordingService::class.java)
-                .setAction(action)
 
-            startForegroundService(intent)
+        try {
+            val intent = Intent(
+                this,
+                RecordingService::class.java
+            ).setAction(action)
+
+            if (Build.VERSION.SDK_INT >= 26) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
 
             status.text = when (action) {
+
                 RecordingService.ACTION_ENABLE_AUTO ->
-                    "正在啟用來電自動偵測，請確認通知列。"
+                    "來電自動偵測服務啟動中。"
 
                 RecordingService.ACTION_MANUAL_START ->
-                    "正在啟動手動錄音。"
+                    "手動錄音啟動中。"
 
                 RecordingService.ACTION_STOP_RECORDING ->
                     "已送出停止錄音指令。"
@@ -137,22 +161,28 @@ class MainActivity : Activity() {
         )
 
         if (requestCode == this.requestCode) {
+
             val audioGranted =
-                checkSelfPermission(Manifest.permission.RECORD_AUDIO) ==
-                    PackageManager.PERMISSION_GRANTED
+                checkSelfPermission(
+                    Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
 
             val phoneGranted =
-                checkSelfPermission(Manifest.permission.READ_PHONE_STATE) ==
-                    PackageManager.PERMISSION_GRANTED
+                checkSelfPermission(
+                    Manifest.permission.READ_PHONE_STATE
+                ) == PackageManager.PERMISSION_GRANTED
 
             if (audioGranted && phoneGranted) {
+
                 pendingAction?.let {
                     sendServiceAction(it)
                 }
+
             } else {
+
                 Toast.makeText(
                     this,
-                    "需要麥克風及電話狀態權限才能使用自動偵測。",
+                    "需要麥克風及電話狀態權限。",
                     Toast.LENGTH_LONG
                 ).show()
             }
