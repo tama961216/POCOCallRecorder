@@ -1,0 +1,657 @@
+
+package tw.pococallrecorder
+
+import android.app.*
+import android.content.*
+import android.content.pm.ServiceInfo
+import android.media.*
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
+import android.os.*
+import android.provider.MediaStore
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
+
+class AudioCaptureService : Service() {
+
+    companion object {
+        const val ACTION_START =
+            "tw.pococallrecorder.AUDIO_CAPTURE_START"
+
+        const val ACTION_STOP =
+            "tw.pococallrecorder.AUDIO_CAPTURE_STOP"
+
+        const val EXTRA_RESULT_CODE = "result_code"
+        const val EXTRA_RESULT_DATA = "result_data"
+    }
+
+    private val channelId = "audio_capture_channel"
+    private val notificationId = 20
+
+    private var projection: MediaProjection? = null
+    private var audioRecord: AudioRecord? = null
+    private var encoder: MediaCodec? = null
+    private var muxer: MediaMuxer? = null
+
+    private var outputUri: android.net.Uri? = null
+    private var outputFd: ParcelFileDescriptor? = null
+
+    private var audioTrackIndex = -1
+    private var muxerStarted = false
+
+    private val running = AtomicBoolean(false)
+    private var captureThread: Thread? = null
+
+    private val projectionCallback =
+        object : MediaProjection.Callback() {
+            override fun onStop() {
+                stopCapture()
+                stopSelf()
+            }
+        }
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int
+    ): Int {
+
+        when (intent?.action) {
+
+            ACTION_START -> {
+                startProjectionCapture(intent)
+            }
+
+            ACTION_STOP -> {
+                stopCapture()
+                stopSelf()
+            }
+        }
+
+        return START_NOT_STICKY
+    }
+
+    private fun startProjectionCapture(intent: Intent) {
+
+        if (running.get()) return
+
+        val resultCode =
+            intent.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
+
+        val resultData =
+            if (Build.VERSION.SDK_INT >= 33) {
+                intent.getParcelableExtra(
+                    EXTRA_RESULT_DATA,
+                    Intent::class.java
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra<Intent>(
+                    EXTRA_RESULT_DATA
+                )
+            }
+
+        if (resultCode != Activity.RESULT_OK || resultData == null) {
+            stopSelf()
+            return
+        }
+
+        try {
+
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(
+                    notificationId,
+                    buildNotification("正在準備系統音訊擷取"),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(
+                    notificationId,
+                    buildNotification("正在準備系統音訊擷取")
+                )
+            }
+
+            val manager =
+                getSystemService(
+                    MEDIA_PROJECTION_SERVICE
+                ) as MediaProjectionManager
+
+            projection =
+                manager.getMediaProjection(
+                    resultCode,
+                    resultData
+                )
+
+            projection?.registerCallback(
+                projectionCallback,
+                Handler(Looper.getMainLooper())
+            )
+
+            prepareOutput()
+            prepareEncoder()
+            prepareAudioRecord()
+
+            running.set(true)
+
+            audioRecord?.startRecording()
+
+            updateNotification("系統音訊擷取中")
+
+            captureThread = Thread {
+                captureLoop()
+            }.apply {
+                name = "POCO-Audio-Capture"
+                start()
+            }
+
+        } catch (e: Exception) {
+
+            updateNotification(
+                "擷取啟動失敗：${e.message}"
+            )
+
+            stopCapture()
+            stopSelf()
+        }
+    }
+
+    private fun prepareOutput() {
+
+        val name =
+            "POCO_SystemAudio_" +
+            SimpleDateFormat(
+                "yyyyMMdd_HHmmss",
+                Locale.US
+            ).format(Date()) +
+            ".m4a"
+
+        val values = ContentValues().apply {
+
+            put(
+                MediaStore.Audio.Media.DISPLAY_NAME,
+                name
+            )
+
+            put(
+                MediaStore.Audio.Media.MIME_TYPE,
+                "audio/mp4"
+            )
+
+            put(
+                MediaStore.Audio.Media.RELATIVE_PATH,
+                "Music/POCOCallRecorder"
+            )
+
+            if (Build.VERSION.SDK_INT >= 29) {
+                put(
+                    MediaStore.Audio.Media.IS_PENDING,
+                    1
+                )
+            }
+        }
+
+        outputUri =
+            contentResolver.insert(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                values
+            ) ?: throw IllegalStateException(
+                "無法建立錄音檔"
+            )
+
+        outputFd =
+            contentResolver.openFileDescriptor(
+                outputUri!!,
+                "w"
+            ) ?: throw IllegalStateException(
+                "無法開啟錄音檔"
+            )
+
+        muxer = MediaMuxer(
+            outputFd!!.fileDescriptor,
+            MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4
+        )
+    }
+
+    private fun prepareEncoder() {
+
+        val format = MediaFormat.createAudioFormat(
+            MediaFormat.MIMETYPE_AUDIO_AAC,
+            44100,
+            2
+        )
+
+        format.setInteger(
+            MediaFormat.KEY_AAC_PROFILE,
+            MediaCodecInfo.CodecProfileLevel.AACObjectLC
+        )
+
+        format.setInteger(
+            MediaFormat.KEY_BIT_RATE,
+            128000
+        )
+
+        format.setInteger(
+            MediaFormat.KEY_MAX_INPUT_SIZE,
+            16384
+        )
+
+        encoder = MediaCodec.createEncoderByType(
+            MediaFormat.MIMETYPE_AUDIO_AAC
+        )
+
+        encoder!!.configure(
+            format,
+            null,
+            null,
+            MediaCodec.CONFIGURE_FLAG_ENCODE
+        )
+
+        encoder!!.start()
+    }
+
+    private fun prepareAudioRecord() {
+
+        val currentProjection =
+            projection ?: throw IllegalStateException(
+                "MediaProjection 尚未建立"
+            )
+
+        val playbackConfig =
+            AudioPlaybackCaptureConfiguration.Builder(
+                currentProjection
+            )
+                .addMatchingUsage(
+                    AudioAttributes.USAGE_MEDIA
+                )
+                .addMatchingUsage(
+                    AudioAttributes.USAGE_GAME
+                )
+                .addMatchingUsage(
+                    AudioAttributes.USAGE_UNKNOWN
+                )
+                .build()
+
+        val audioFormat =
+            AudioFormat.Builder()
+                .setEncoding(
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                .setSampleRate(44100)
+                .setChannelMask(
+                    AudioFormat.CHANNEL_IN_STEREO
+                )
+                .build()
+
+        val minBuffer =
+            AudioRecord.getMinBufferSize(
+                44100,
+                AudioFormat.CHANNEL_IN_STEREO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
+
+        if (minBuffer <= 0) {
+            throw IllegalStateException(
+                "無法取得音訊緩衝區"
+            )
+        }
+
+        audioRecord =
+            AudioRecord.Builder()
+                .setAudioFormat(audioFormat)
+                .setBufferSizeInBytes(
+                    minBuffer * 4
+                )
+                .setAudioPlaybackCaptureConfig(
+                    playbackConfig
+                )
+                .build()
+
+        if (
+            audioRecord?.state !=
+            AudioRecord.STATE_INITIALIZED
+        ) {
+            throw IllegalStateException(
+                "AudioRecord 初始化失敗"
+            )
+        }
+    }
+
+    private fun captureLoop() {
+
+        val buffer = ByteArray(8192)
+        val info = MediaCodec.BufferInfo()
+
+        var presentationTimeUs = 0L
+
+        try {
+
+            while (running.get()) {
+
+                val count =
+                    audioRecord?.read(
+                        buffer,
+                        0,
+                        buffer.size
+                    ) ?: -1
+
+                if (count > 0) {
+
+                    val inputIndex =
+                        encoder!!.dequeueInputBuffer(10000)
+
+                    if (inputIndex >= 0) {
+
+                        val inputBuffer =
+                            encoder!!.getInputBuffer(
+                                inputIndex
+                            )!!
+
+                        inputBuffer.clear()
+                        inputBuffer.put(
+                            buffer,
+                            0,
+                            count
+                        )
+
+                        val sampleCount =
+                            count / 4
+
+                        val durationUs =
+                            sampleCount * 1_000_000L / 44100L
+
+                        encoder!!.queueInputBuffer(
+                            inputIndex,
+                            0,
+                            count,
+                            presentationTimeUs,
+                            0
+                        )
+
+                        presentationTimeUs += durationUs
+                    }
+                }
+
+                drainEncoder(info, false)
+            }
+
+        } catch (_: Exception) {
+            // 停止時可能發生讀取中斷
+        }
+
+        try {
+
+            val inputIndex =
+                encoder?.dequeueInputBuffer(10000) ?: -1
+
+            if (inputIndex >= 0) {
+
+                encoder?.queueInputBuffer(
+                    inputIndex,
+                    0,
+                    0,
+                    presentationTimeUs,
+                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                )
+            }
+
+            drainEncoder(info, true)
+
+        } catch (_: Exception) {}
+
+        finalizeOutput()
+    }
+
+    private fun drainEncoder(
+        info: MediaCodec.BufferInfo,
+        endOfStream: Boolean
+    ) {
+
+        val codec = encoder ?: return
+
+        var attempts = 0
+
+        while (attempts < 50) {
+
+            val outputIndex =
+                codec.dequeueOutputBuffer(
+                    info,
+                    10000
+                )
+
+            when {
+
+                outputIndex ==
+                    MediaCodec.INFO_TRY_AGAIN_LATER -> {
+
+                    if (!endOfStream) return
+                    attempts++
+                }
+
+                outputIndex ==
+                    MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+
+                    if (muxerStarted) {
+                        throw IllegalStateException(
+                            "音訊格式重複變更"
+                        )
+                    }
+
+                    audioTrackIndex =
+                        muxer!!.addTrack(
+                            codec.outputFormat
+                        )
+
+                    muxer!!.start()
+                    muxerStarted = true
+                }
+
+                outputIndex >= 0 -> {
+
+                    val outputBuffer =
+                        codec.getOutputBuffer(outputIndex)
+
+                    if (
+                        outputBuffer != null &&
+                        info.size > 0 &&
+                        muxerStarted
+                    ) {
+
+                        outputBuffer.position(
+                            info.offset
+                        )
+
+                        outputBuffer.limit(
+                            info.offset + info.size
+                        )
+
+                        muxer!!.writeSampleData(
+                            audioTrackIndex,
+                            outputBuffer,
+                            info
+                        )
+                    }
+
+                    codec.releaseOutputBuffer(
+                        outputIndex,
+                        false
+                    )
+
+                    if (
+                        info.flags and
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                    ) {
+                        return
+                    }
+                }
+            }
+        }
+    }
+
+    private fun finalizeOutput() {
+
+        try {
+            if (muxerStarted) {
+                muxer?.stop()
+            }
+        } catch (_: Exception) {}
+
+        try {
+            muxer?.release()
+        } catch (_: Exception) {}
+
+        muxer = null
+        muxerStarted = false
+
+        try {
+            encoder?.stop()
+            encoder?.release()
+        } catch (_: Exception) {}
+
+        encoder = null
+
+        try {
+            outputFd?.close()
+        } catch (_: Exception) {}
+
+        outputFd = null
+
+        outputUri?.let { uri ->
+
+            if (muxerStarted.not()) {
+                try {
+                    val values = ContentValues()
+
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        values.put(
+                            MediaStore.Audio.Media.IS_PENDING,
+                            0
+                        )
+                    }
+
+                    contentResolver.update(
+                        uri,
+                        values,
+                        null,
+                        null
+                    )
+                } catch (_: Exception) {}
+            }
+        }
+
+        outputUri = null
+    }
+
+    private fun stopCapture() {
+
+        if (!running.getAndSet(false)) {
+            if (projection != null) {
+                try {
+                    projection?.stop()
+                } catch (_: Exception) {}
+
+                projection = null
+            }
+            return
+        }
+
+        try {
+            audioRecord?.stop()
+        } catch (_: Exception) {}
+
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {}
+
+        audioRecord = null
+
+        if (Thread.currentThread() != captureThread) {
+            try {
+                captureThread?.join(2000)
+            } catch (_: Exception) {}
+        }
+
+        captureThread = null
+
+        try {
+            projection?.unregisterCallback(
+                projectionCallback
+            )
+        } catch (_: Exception) {}
+
+        try {
+            projection?.stop()
+        } catch (_: Exception) {}
+
+        projection = null
+    }
+
+    private fun createNotificationChannel() {
+
+        if (Build.VERSION.SDK_INT >= 26) {
+
+            val channel = NotificationChannel(
+                channelId,
+                "系統音訊擷取",
+                NotificationManager.IMPORTANCE_LOW
+            )
+
+            getSystemService(
+                NotificationManager::class.java
+            ).createNotificationChannel(channel)
+        }
+    }
+
+    private fun buildNotification(
+        message: String
+    ): Notification {
+
+        val builder =
+            if (Build.VERSION.SDK_INT >= 26) {
+                Notification.Builder(this, channelId)
+            } else {
+                @Suppress("DEPRECATION")
+                Notification.Builder(this)
+            }
+
+        return builder
+            .setContentTitle("POCO Call Recorder")
+            .setContentText(message)
+            .setSmallIcon(
+                android.R.drawable.ic_btn_speak_now
+            )
+            .setOngoing(true)
+            .build()
+    }
+
+    private fun updateNotification(
+        message: String
+    ) {
+
+        getSystemService(
+            NotificationManager::class.java
+        ).notify(
+            notificationId,
+            buildNotification(message)
+        )
+    }
+
+    override fun onDestroy() {
+
+        stopCapture()
+
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (_: Exception) {}
+
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}
