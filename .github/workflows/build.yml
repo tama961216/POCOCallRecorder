@@ -12,15 +12,15 @@ permissions:
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build POCO Call Recorder
     runs-on: ubuntu-latest
 
     steps:
-      # 1. 下載專案
+      # 1. 取得專案
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 2. 設定 Java
+      # 2. 設定 Java 17
       - name: Setup JDK 17
         uses: actions/setup-java@v4
         with:
@@ -28,41 +28,59 @@ jobs:
           java-version: '17'
 
       # 3. 設定 Android SDK
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME"
+
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+            -name sdkmanager -type f | sort -V | tail -n 1)
+
+          echo "Using SDK Manager: $SDKMANAGER"
+
+          yes | "$SDKMANAGER" --licenses || true
+
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-36" \
+            "build-tools;36.0.0"
 
       # 4. 設定 Gradle
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # 5. 檢查 AndroidManifest.xml
-      - name: Validate AndroidManifest XML
+      # 5. 檢查 Manifest
+      - name: Validate AndroidManifest
         run: |
           python3 - <<'PY'
           import xml.etree.ElementTree as ET
 
           path = "app/src/main/AndroidManifest.xml"
 
-          print("Checking:", path)
-
           try:
               ET.parse(path)
-              print("AndroidManifest.xml XML syntax OK")
+              print("Manifest XML syntax OK")
           except ET.ParseError as e:
-              print("AndroidManifest.xml XML ERROR:")
-              print(e)
+              print("Manifest XML ERROR:", e)
               raise
           PY
 
       # 6. 編譯 APK
       - name: Build APK
-        run: gradle assembleDebug --stacktrace --info
+        run: |
+          gradle assembleDebug --stacktrace
 
       # 7. 確認 APK
-      - name: Check APK
+      - name: Verify APK
         run: |
-          ls -lh app/build/outputs/apk/debug/
-          test -f app/build/outputs/apk/debug/app-debug.apk
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+
+          if [ ! -f "$APK" ]; then
+            echo "APK not found!"
+            exit 1
+          fi
+
+          ls -lh "$APK"
 
       # 8. 上傳 APK
       - name: Upload APK
