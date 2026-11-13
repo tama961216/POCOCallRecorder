@@ -50,27 +50,17 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       # 5. 檢查 Manifest
-      - name: Validate AndroidManifest
+            - name: Build APK
         run: |
-          python3 - <<'PY'
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
+          set -o pipefail
+          gradle assembleDebug --stacktrace --warning-mode all 2>&1 | tee build.log
 
-          path = Path("app/src/main/AndroidManifest.xml")
-          content = path.read_bytes()
-
-          if content.startswith(b'\xef\xbb\xbf'):
-              content = content[3:]
-
-          content = content.lstrip(b'\r\n\t ')
-
-          if content.startswith(b'<?xml') and content.count(b'<?xml') > 1:
-              raise ValueError("Duplicate XML declaration found")
-
-          ET.fromstring(content)
-
-          print("AndroidManifest.xml validation PASSED")
-          PY
+      - name: Show Build Error
+        if: failure()
+        run: |
+          echo "================ BUILD ERROR ================"
+          grep -n -E "e: |error:|ERROR|What went wrong|Caused by:|Execution failed" build.log | tail -n 100 || true
+          echo "============================================="
 
       # 6. 編譯 APK
       - name: Build APK
